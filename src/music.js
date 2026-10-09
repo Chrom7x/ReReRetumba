@@ -1,5 +1,6 @@
 import { execFile, spawn } from 'node:child_process';
-import { readdirSync } from 'node:fs';
+import { readdirSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Readable } from 'node:stream';
 import { fileURLToPath } from 'node:url';
@@ -18,6 +19,14 @@ import ffmpegPath from 'ffmpeg-static';
 
 const YTDLP = fileURLToPath(new URL(process.platform === 'win32' ? '../bin/yt-dlp.exe' : '../bin/yt-dlp', import.meta.url));
 const execFileAsync = promisify(execFile);
+
+// Opcional: cookies de YouTube (archivo cookies.txt en base64) para servidores cuya IP YouTube bloquea.
+let cookieArgs = [];
+if (process.env.YT_COOKIES_B64) {
+  const cookiesFile = join(tmpdir(), 'yt-cookies.txt');
+  writeFileSync(cookiesFile, Buffer.from(process.env.YT_COOKIES_B64, 'base64'));
+  cookieArgs = ['--cookies', cookiesFile];
+}
 
 const BYTES_PER_SEC = 48000 * 2 * 2; // PCM s16le, 48 kHz, estéreo
 const SKIP_FADE_SECONDS = 2;
@@ -40,12 +49,13 @@ export async function resolveTrack(query) {
   try {
     const { stdout } = await execFileAsync(
       YTDLP,
-      [target, '--print', '%(title)s\t%(webpage_url)s', '--no-playlist', '--skip-download', '--js-runtimes', 'node'],
+      [target, '--print', '%(title)s\t%(webpage_url)s', '--no-playlist', '--skip-download', '--js-runtimes', 'node', ...cookieArgs],
       { timeout: 30_000 },
     );
     const [title, url] = stdout.trim().split('\n')[0]?.split('\t') ?? [];
     return url ? { title, url } : null;
-  } catch {
+  } catch (err) {
+    console.error(`yt-dlp falló buscando "${query}":`, String(err.stderr || err.message).trim().slice(-600));
     return null;
   }
 }
@@ -91,7 +101,7 @@ class PcmReader {
     const keepErr = (d) => (this.errText = (this.errText + d).slice(-800));
     this.ytdlp = track.file
       ? null
-      : spawn(YTDLP, ['-f', 'bestaudio/best', '--no-playlist', '--js-runtimes', 'node', '-q', '-o', '-', track.url], {
+      : spawn(YTDLP, ['-f', 'bestaudio/best', '--no-playlist', '--js-runtimes', 'node', ...cookieArgs, '-q', '-o', '-', track.url], {
           stdio: ['ignore', 'pipe', 'pipe'],
         });
     this.ytdlp?.stderr.on('data', keepErr);
