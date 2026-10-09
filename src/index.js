@@ -1,154 +1,160 @@
 import 'dotenv/config';
-import { Client, EmbedBuilder, GatewayIntentBits, MessageFlags } from 'discord.js';
-import { AudioPlayerStatus } from '@discordjs/voice';
+import { Client, EmbedBuilder, GatewayIntentBits } from 'discord.js';
 import ffmpegPath from 'ffmpeg-static';
 import { destroyQueue, enqueue, findLocalFile, getQueue, listLocalFiles, resolveTrack, setFade, shuffle, skip } from './music.js';
 import { getSpotifyTracks, parseSpotifyUrl } from './spotify.js';
 
 process.env.FFMPEG_PATH ??= ffmpegPath;
 
-const client = new Client({ intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildVoiceStates] });
+const PREFIX = process.env.PREFIX || '!';
+
+const client = new Client({
+  intents: [
+    GatewayIntentBits.Guilds,
+    GatewayIntentBits.GuildVoiceStates,
+    GatewayIntentBits.GuildMessages,
+    GatewayIntentBits.MessageContent, // privilegiado: actívalo en el portal de desarrolladores
+  ],
+});
 
 const infoEmbed = new EmbedBuilder()
   .setTitle('🎵 Cómo usar el bot de música')
-  .setDescription('Escribe `/` en el chat y elige un comando. Para usar `/play` debes estar **dentro de un canal de voz**.')
+  .setDescription(`Escribe los comandos en el chat empezando con \`${PREFIX}\`. Para usar \`${PREFIX}play\` debes estar **dentro de un canal de voz**.`)
   .addFields(
     {
       name: '▶️ Reproducir',
       value: [
-        '`/play cancion:<nombre o enlace>` — reproduce o agrega a la cola. Acepta un nombre, un enlace de YouTube, un enlace de **Spotify** (canción, álbum o playlist pública), un enlace de un **reel de Instagram** (público) o un **archivo .mp3** de la carpeta `musica/` (al escribir `/play` aparecen los archivos disponibles con 📁).',
-        'Opción `aleatorio:True` — pone en orden aleatorio una playlist o un álbum.',
+        `\`${PREFIX}play <nombre o enlace>\` — reproduce o agrega a la cola. Acepta un nombre, un enlace de YouTube, un enlace de **Spotify** (canción, álbum o playlist pública), un enlace de un **reel de Instagram** (público) o un **archivo .mp3** de la carpeta \`musica/\` (mira cuáles hay con \`${PREFIX}archivos\`).`,
+        `Agrega \`--aleatorio\` al final para poner en orden aleatorio una playlist o un álbum. Ejemplo: \`${PREFIX}play <enlace de Spotify> --aleatorio\``,
       ].join('\n'),
     },
     {
       name: '🎛️ Control',
       value: [
-        '`/pause` — pausa la música.',
-        '`/resume` — la reanuda.',
-        '`/skip` — salta la canción actual (con un fundido corto).',
-        '`/stop` — detiene todo, vacía la cola y el bot sale del canal.',
+        `\`${PREFIX}pause\` — pausa la música.`,
+        `\`${PREFIX}resume\` — la reanuda.`,
+        `\`${PREFIX}skip\` — salta la canción actual (con un fundido corto).`,
+        `\`${PREFIX}stop\` — detiene todo, vacía la cola y el bot sale del canal.`,
       ].join('\n'),
     },
     {
       name: '📋 Cola',
       value: [
-        '`/queue` — muestra la canción actual y las próximas 10.',
-        '`/remove posicion:<número>` — quita una canción de la cola antes de que suene. Elige de la lista que aparece o escribe parte del nombre.',
-        '`/shuffle` — pone en orden aleatorio lo que ya está en cola.',
+        `\`${PREFIX}queue\` — muestra la canción actual y las próximas 10, con su número.`,
+        `\`${PREFIX}remove <número>\` — quita de la cola la canción con ese número (míralo en \`${PREFIX}queue\`) antes de que suene.`,
+        `\`${PREFIX}shuffle\` — pone en orden aleatorio lo que ya está en cola.`,
       ].join('\n'),
     },
     {
       name: '🎚️ Transiciones',
-      value: '`/mix segundos:<0-15>` — duración de la transición (crossfade) entre canciones. `0` la desactiva. Por defecto: 6.',
+      value: `\`${PREFIX}mix <0-15>\` — duración en segundos de la transición (crossfade) entre canciones. \`0\` la desactiva. Por defecto: 6.`,
     },
     {
       name: 'ℹ️ Ten en cuenta',
       value: [
-        '• `/remove` no alcanza la canción que ya se está preparando, justo antes de que empiece. En ese caso usa `/skip` cuando suene.',
+        `• \`${PREFIX}remove\` no alcanza la canción que ya se está preparando, justo antes de que empiece. En ese caso usa \`${PREFIX}skip\` cuando suene.`,
         '• Las playlists de Spotify deben ser públicas y se leen hasta unas 100 canciones.',
         '• El audio viene de YouTube, así que la versión puede variar respecto a Spotify.',
       ].join('\n'),
     },
   );
 
-client.once('clientReady', (c) => console.log(`Conectado como ${c.user.tag}`));
+client.once('clientReady', (c) => console.log(`Conectado como ${c.user.tag} (prefijo: ${PREFIX})`));
 
-client.on('interactionCreate', async (interaction) => {
-  // Sugerencias para /remove: las canciones en cola, filtradas por lo que se vaya escribiendo.
-  if (interaction.isAutocomplete() && interaction.commandName === 'remove') {
-    const typed = interaction.options.getFocused().toLowerCase();
-    const tracks = getQueue(interaction.guildId)?.tracks ?? [];
-    const choices = tracks
-      .map((t, i) => ({ name: `${i + 1}. ${t.title}`.slice(0, 100), value: i + 1 }))
-      .filter((c) => c.name.toLowerCase().includes(typed))
-      .slice(0, 25);
-    return interaction.respond(choices);
-  }
+// Alias -> nombre de comando
+const ALIASES = { p: 'play', s: 'skip', q: 'queue', files: 'archivos' };
 
-  // Sugerencias para /play: archivos de la carpeta musica/ que coincidan. El texto escrito
-  // va primero para que la búsqueda libre y los enlaces sigan funcionando.
-  if (interaction.isAutocomplete() && interaction.commandName === 'play') {
-    const typed = interaction.options.getFocused();
-    const files = listLocalFiles()
-      .filter((f) => f.toLowerCase().includes(typed.toLowerCase()))
-      .map((f) => ({ name: `📁 ${f}`.slice(0, 100), value: f.slice(0, 100) }));
-    const choices = typed ? [{ name: typed.slice(0, 100), value: typed.slice(0, 100) }, ...files] : files;
-    return interaction.respond(choices.slice(0, 25));
-  }
+client.on('messageCreate', async (message) => {
+  if (message.author.bot || !message.guildId || !message.content.startsWith(PREFIX)) return;
 
-  if (!interaction.isChatInputCommand() || !interaction.guildId) return;
-  const queue = getQueue(interaction.guildId);
-  const reply = (content) => interaction.reply({ content, flags: MessageFlags.Ephemeral });
+  const [rawName, ...rest] = message.content.slice(PREFIX.length).trim().split(/\s+/);
+  const name = rawName.toLowerCase();
+  const command = ALIASES[name] ?? name;
+  const args = rest.join(' ').trim();
+  const queue = getQueue(message.guildId);
+  const reply = (content) => message.reply({ content, allowedMentions: { repliedUser: false } });
 
-  switch (interaction.commandName) {
-    case 'play': {
-      if (!interaction.member.voice.channel) return reply('Entra primero a un canal de voz.');
-      await interaction.deferReply();
-      try {
-        const input = interaction.options.getString('cancion', true);
-        const mix = interaction.options.getBoolean('aleatorio') ?? false;
+  try {
+    switch (command) {
+      case 'play': {
+        if (!message.member.voice.channel) return reply('Entra primero a un canal de voz.');
+        const mix = /(^|\s)--aleatorio\b/i.test(args);
+        const input = args.replace(/(^|\s)--aleatorio\b/gi, ' ').trim();
+        if (!input) return reply(`Dime qué reproducir. Ejemplo: \`${PREFIX}play nombre de la canción\``);
+
+        const status = await reply('🔎 Buscando...');
         const spotify = parseSpotifyUrl(input);
+        const local = spotify ? null : findLocalFile(input);
 
         let tracks;
         if (spotify) {
           tracks = await getSpotifyTracks(spotify);
-          if (!tracks.length) return interaction.editReply('Esa lista de Spotify está vacía.');
+          if (!tracks.length) return status.edit('Esa lista de Spotify está vacía.');
           if (mix) shuffle(tracks);
-        } else if (findLocalFile(input)) {
-          tracks = [findLocalFile(input)];
+        } else if (local) {
+          tracks = [local];
         } else {
           const track = await resolveTrack(input);
-          if (!track) return interaction.editReply('No encontré nada.');
+          if (!track) return status.edit('No encontré nada.');
           tracks = [track];
         }
 
-        const started = await enqueue(interaction, tracks);
+        const started = await enqueue(message, tracks);
         const label = tracks.length > 1 ? `**${tracks.length} canciones**${mix ? ' (orden aleatorio 🔀)' : ''}` : `**${tracks[0].title}**`;
-        return interaction.editReply(started ? `▶️ Reproduciendo ${label}` : `➕ En cola: ${label}`);
-      } catch (err) {
-        console.error(err);
-        return interaction.editReply('Ocurrió un error al reproducir.');
+        return status.edit(started ? `▶️ Reproduciendo ${label}` : `➕ En cola: ${label}`);
       }
+      case 'skip':
+        if (!queue?.current) return reply('No hay nada sonando.');
+        skip(queue);
+        return reply('⏭️ Saltada.');
+      case 'pause':
+        if (!queue) return reply('No hay nada sonando.');
+        queue.player.pause();
+        return reply('⏸️ Pausado.');
+      case 'resume':
+        if (!queue) return reply('No hay nada sonando.');
+        queue.player.unpause();
+        return reply('▶️ Reanudado.');
+      case 'queue': {
+        if (!queue?.current) return reply('La cola está vacía.');
+        const lines = queue.tracks.slice(0, 10).map((t, i) => `${i + 1}. ${t.title}`);
+        const more = queue.tracks.length > 10 ? `\n…y ${queue.tracks.length - 10} más` : '';
+        return reply(`**Ahora:** ${queue.current.title}\n${lines.join('\n') || '_(nada más en cola)_'}${more}`);
+      }
+      case 'remove': {
+        const pos = Number.parseInt(args, 10);
+        if (!queue?.tracks.length) return reply('La cola está vacía.');
+        if (!Number.isInteger(pos) || pos < 1) return reply(`Dime el número de la canción. Ejemplo: \`${PREFIX}remove 3\` (míralo en \`${PREFIX}queue\`).`);
+        if (pos > queue.tracks.length) return reply(`Solo hay ${queue.tracks.length} canciones en cola.`);
+        const [removed] = queue.tracks.splice(pos - 1, 1);
+        return reply(`🗑️ Quitada de la cola: **${removed.title}**`);
+      }
+      case 'shuffle':
+        if (!queue?.tracks.length) return reply('No hay canciones en cola para mezclar.');
+        shuffle(queue.tracks);
+        return reply(`🔀 Puestas en orden aleatorio ${queue.tracks.length} canciones.`);
+      case 'mix': {
+        const seconds = Number.parseInt(args, 10);
+        if (!Number.isInteger(seconds) || seconds < 0 || seconds > 15) return reply(`Dime los segundos, de 0 a 15. Ejemplo: \`${PREFIX}mix 6\``);
+        setFade(message.guildId, seconds);
+        return reply(seconds ? `🎚️ Transición de ${seconds}s entre canciones (aplica desde la próxima canción).` : '🎚️ Transiciones desactivadas.');
+      }
+      case 'archivos': {
+        const files = listLocalFiles();
+        return reply(files.length ? `📁 Archivos en \`musica/\`:\n${files.map((f) => `• ${f}`).join('\n')}`.slice(0, 1900) : 'No hay archivos en la carpeta `musica/`.');
+      }
+      case 'info':
+      case 'help':
+      case 'ayuda':
+        return message.reply({ embeds: [infoEmbed], allowedMentions: { repliedUser: false } });
+      case 'stop':
+        if (!queue) return reply('No hay nada sonando.');
+        destroyQueue(message.guildId);
+        return reply('⏹️ Detenido.');
     }
-    case 'skip':
-      if (!queue?.current) return reply('No hay nada sonando.');
-      skip(queue);
-      return reply('⏭️ Saltada.');
-    case 'mix': {
-      const seconds = interaction.options.getInteger('segundos', true);
-      setFade(interaction.guildId, seconds);
-      return reply(seconds ? `🎚️ Transición de ${seconds}s entre canciones (aplica desde la próxima canción).` : '🎚️ Transiciones desactivadas.');
-    }
-    case 'pause':
-      if (!queue) return reply('No hay nada sonando.');
-      queue.player.pause();
-      return reply('⏸️ Pausado.');
-    case 'resume':
-      if (!queue) return reply('No hay nada sonando.');
-      queue.player.unpause();
-      return reply('▶️ Reanudado.');
-    case 'queue': {
-      if (!queue?.current) return reply('La cola está vacía.');
-      const lines = queue.tracks.slice(0, 10).map((t, i) => `${i + 1}. ${t.title}`);
-      return reply(`**Ahora:** ${queue.current.title}\n${lines.join('\n') || '_(nada más en cola)_'}`);
-    }
-    case 'info':
-      return interaction.reply({ embeds: [infoEmbed] });
-    case 'remove': {
-      const pos = interaction.options.getInteger('posicion', true);
-      if (!queue?.tracks.length) return reply('La cola está vacía.');
-      if (pos > queue.tracks.length) return reply(`Solo hay ${queue.tracks.length} canciones en cola.`);
-      const [removed] = queue.tracks.splice(pos - 1, 1);
-      return reply(`🗑️ Quitada de la cola: **${removed.title}**`);
-    }
-    case 'shuffle':
-      if (!queue?.tracks.length) return reply('No hay canciones en cola para mezclar.');
-      shuffle(queue.tracks);
-      return reply(`🔀 Mezcladas ${queue.tracks.length} canciones.`);
-    case 'stop':
-      if (!queue) return reply('No hay nada sonando.');
-      destroyQueue(interaction.guildId);
-      return reply('⏹️ Detenido.');
+  } catch (err) {
+    console.error(err);
+    reply('Ocurrió un error al ejecutar el comando.').catch(() => {});
   }
 });
 
