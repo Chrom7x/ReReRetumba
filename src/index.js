@@ -177,7 +177,7 @@ client.on('messageCreate', async (message) => {
       }
       case 'stop':
         if (!queue) return reply('No hay nada sonando.');
-        destroyQueue(message.guildId);
+        destroyQueue(message.guildId, 'comando !stop');
         return reply('⏹️ Detenido.');
     }
   } catch (err) {
@@ -185,6 +185,10 @@ client.on('messageCreate', async (message) => {
     reply('Ocurrió un error al ejecutar el comando.').catch(() => {});
   }
 });
+
+// Un error suelto no debe tumbar el bot (Railway lo reiniciaría y saldría del canal de voz).
+process.on('unhandledRejection', (err) => console.error('unhandledRejection:', err));
+process.on('uncaughtException', (err) => console.error('uncaughtException:', err));
 
 if (!process.env.DISCORD_TOKEN) {
   console.error('Falta DISCORD_TOKEN en .env');

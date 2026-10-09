@@ -270,9 +270,11 @@ export async function enqueue(interaction, newTracks) {
       q.streaming = false;
       q.current = null;
       if (q.tracks.length) startStream(q);
-      else q.idleTimer = setTimeout(() => destroyQueue(guildId), IDLE_LEAVE_MS); // se queda un rato por si piden otra
+      else q.idleTimer = setTimeout(() => destroyQueue(guildId, 'inactividad (cola vacía)'), IDLE_LEAVE_MS); // se queda un rato por si piden otra
     });
     player.on('error', (err) => console.error('Error del reproductor:', err.message));
+    player.on('stateChange', (o, n) => console.log(`[voz] reproductor: ${o.status} -> ${n.status}`));
+    connection.on('stateChange', (o, n) => console.log(`[voz] conexión: ${o.status} -> ${n.status}`));
     connection.on(VoiceConnectionStatus.Disconnected, async () => {
       try {
         await Promise.race([
@@ -280,11 +282,16 @@ export async function enqueue(interaction, newTracks) {
           entersState(connection, VoiceConnectionStatus.Connecting, 5_000),
         ]);
       } catch {
-        destroyQueue(guildId);
+        destroyQueue(guildId, 'desconectado del canal de voz');
       }
     });
 
-    await entersState(connection, VoiceConnectionStatus.Ready, 20_000);
+    try {
+      await entersState(connection, VoiceConnectionStatus.Ready, 20_000);
+    } catch (err) {
+      destroyQueue(guildId, 'no se pudo establecer la conexión de voz en 20 s');
+      throw err;
+    }
   }
 
   clearTimeout(queue.idleTimer);
@@ -302,9 +309,10 @@ export function skip(queue) {
   queue.reader.close();
 }
 
-export function destroyQueue(guildId) {
+export function destroyQueue(guildId, reason = 'sin motivo indicado') {
   const queue = queues.get(guildId);
   if (!queue) return;
+  console.log(`[voz] el bot sale del canal: ${reason}`);
   queues.delete(guildId);
   clearTimeout(queue.idleTimer);
   queue.tracks.length = 0;
