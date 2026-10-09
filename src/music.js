@@ -31,6 +31,7 @@ if (process.env.YT_COOKIES_B64) {
 const BYTES_PER_SEC = 48000 * 2 * 2; // PCM s16le, 48 kHz, estéreo
 const SKIP_FADE_SECONDS = 2;
 const DEFAULT_FADE_SECONDS = 6;
+const PREFETCH_LEAD_SECONDS = 30; // cuánto antes de acabar una canción se empieza a cargar la siguiente
 const IDLE_LEAVE_MS = 5 * 60 * 1000; // minutos que el bot espera en el canal tras terminar la cola
 
 const queues = new Map();
@@ -49,11 +50,11 @@ export async function resolveTrack(query) {
   try {
     const { stdout } = await execFileAsync(
       YTDLP,
-      [target, '--print', '%(title)s\t%(webpage_url)s', '--no-playlist', '--skip-download', '--js-runtimes', 'node', ...cookieArgs],
+      [target, '--print', '%(title)s\t%(webpage_url)s\t%(duration)s', '--no-playlist', '--skip-download', '--js-runtimes', 'node', ...cookieArgs],
       { timeout: 30_000 },
     );
-    const [title, url] = stdout.trim().split('\n')[0]?.split('\t') ?? [];
-    return url ? { title, url } : null;
+    const [title, url, duration] = stdout.trim().split('\n')[0]?.split('\t') ?? [];
+    return url ? { title, url, duration: Number(duration) || null } : null;
   } catch (err) {
     console.error(`yt-dlp falló buscando "${query}":`, String(err.stderr || err.message).trim().slice(-600));
     return null;
@@ -163,6 +164,12 @@ class PcmReader {
     return buf;
   }
 
+  // Devuelve audio ya leído para que el próximo chunk()/read() lo entregue primero.
+  unread(buf) {
+    if (!buf.length) return;
+    this.rest = this.rest ? Buffer.concat([buf, this.rest]) : buf;
+  }
+
   close() {
     this.ytdlp?.kill();
     this.ff.kill();
@@ -196,8 +203,8 @@ async function nextReader(queue) {
         const found = await resolveTrack(track.query);
         if (!found) throw new Error('sin resultados en YouTube');
         track.url = found.url;
+        track.duration = found.duration; // la del audio de YouTube, que es el que suena
       }
-      queue.current = track;
       return new PcmReader(track);
     } catch (err) {
       console.error('No se pudo reproducir', track.title, err.message);
@@ -206,18 +213,33 @@ async function nextReader(queue) {
   return null;
 }
 
+// Abre la siguiente pista y lee de antemano el inicio que se necesita para fundirla con la actual.
+// Si esto se hiciera al terminar la actual, el arranque de yt-dlp dejaría al reproductor sin audio
+// unos segundos y Discord lo detendría.
+async function prepareNext(queue, bytes) {
+  const reader = await nextReader(queue);
+  if (!reader) return null;
+  queue.pending = reader;
+  return { reader, head: await reader.read(bytes) };
+}
+
 // Una sola secuencia continua de PCM: al final de cada canción se mezcla con el inicio de la siguiente.
 // Se retiene la cola de cada canción (hold) hasta saber si hay otra con la que fundirla.
 export async function* mixTracks(queue) {
   let reader = await nextReader(queue);
   while (reader) {
     queue.reader = reader;
+    queue.current = reader.track;
     const fade = Math.floor((getFade(queue.guildId) * BYTES_PER_SEC) / 4) * 4;
+    // Cuándo empezar a preparar la siguiente (sin duración conocida: a los 20 s de audio).
+    const prefetchAt = (reader.track.duration ? Math.max(0, reader.track.duration - PREFETCH_LEAD_SECONDS) : 20) * BYTES_PER_SEC;
+    let prefetch = null;
     let hold = Buffer.alloc(0);
     let c;
     let got = 0;
     while ((c = await reader.chunk())) {
       got += c.length;
+      if (!prefetch && got >= prefetchAt) prefetch = prepareNext(queue, fade);
       hold = hold.length ? Buffer.concat([hold, c]) : c;
       if (hold.length > fade) {
         yield hold.subarray(0, hold.length - fade);
@@ -227,14 +249,18 @@ export async function* mixTracks(queue) {
     if (!got && !reader.skipped) console.error(`Audio vacío para "${reader.track.title}":`, reader.errText.trim() || '(sin mensaje de error)');
     if (reader.skipped) hold = hold.subarray(0, Math.min(hold.length, SKIP_FADE_SECONDS * BYTES_PER_SEC));
 
-    const next = await nextReader(queue);
-    if (!next) {
+    // Si no había nada en cola al prefetchear, se revisa de nuevo por si pidieron algo en el último rato.
+    const upcoming = (prefetch && (await prefetch)) || (await prepareNext(queue, fade));
+    if (!upcoming) {
       if (hold.length) yield hold;
       return;
     }
+    const { reader: next, head } = upcoming;
+    queue.pending = null;
     queue.reader = next;
-    const head = await next.read(hold.length);
-    if (hold.length) yield crossfade(hold, head);
+    queue.current = next.track;
+    next.unread(head.subarray(hold.length)); // lo que sobre del inicio se reproduce tras el fundido
+    if (hold.length) yield crossfade(hold, head.subarray(0, hold.length));
     reader = next;
   }
 }
@@ -258,7 +284,8 @@ export async function enqueue(interaction, newTracks) {
       guildId: channel.guild.id,
       adapterCreator: channel.guild.voiceAdapterCreator,
     });
-    const player = createAudioPlayer({ behaviors: { noSubscriber: NoSubscriberBehavior.Pause } });
+    // maxMissedFrames: por defecto el reproductor se detiene tras 5 frames (100 ms) sin audio; se tolera hasta 10 s.
+    const player = createAudioPlayer({ behaviors: { noSubscriber: NoSubscriberBehavior.Pause, maxMissedFrames: 500 } });
     connection.subscribe(player);
 
     queue = { guildId, connection, player, tracks: [], current: null, reader: null, streaming: false };
@@ -317,6 +344,7 @@ export function destroyQueue(guildId, reason = 'sin motivo indicado') {
   clearTimeout(queue.idleTimer);
   queue.tracks.length = 0;
   queue.reader?.close();
+  queue.pending?.close();
   queue.player.stop(true);
   queue.connection.destroy();
 }

@@ -52,7 +52,7 @@ const infoEmbed = new EmbedBuilder()
     {
       name: 'ℹ️ Ten en cuenta',
       value: [
-        `• \`${PREFIX}remove\` no alcanza la canción que ya se está preparando, justo antes de que empiece. En ese caso usa \`${PREFIX}skip\` cuando suene.`,
+        `• \`${PREFIX}remove\` no alcanza la canción que ya se está preparando, unos 30 segundos antes de que empiece. En ese caso usa \`${PREFIX}skip\` cuando suene.`,
         '• Las playlists de Spotify deben ser públicas y se leen hasta unas 100 canciones.',
         '• El audio viene de YouTube, así que la versión puede variar respecto a Spotify.',
       ].join('\n'),
