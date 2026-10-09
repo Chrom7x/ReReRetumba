@@ -16,7 +16,7 @@ import {
 } from '@discordjs/voice';
 import ffmpegPath from 'ffmpeg-static';
 
-const YTDLP = fileURLToPath(new URL('../bin/yt-dlp.exe', import.meta.url));
+const YTDLP = fileURLToPath(new URL(process.platform === 'win32' ? '../bin/yt-dlp.exe' : '../bin/yt-dlp', import.meta.url));
 const execFileAsync = promisify(execFile);
 
 const BYTES_PER_SEC = 48000 * 2 * 2; // PCM s16le, 48 kHz, estéreo
