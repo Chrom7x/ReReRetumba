@@ -62,7 +62,12 @@ const infoEmbed = new EmbedBuilder()
 client.once('clientReady', (c) => console.log(`Conectado como ${c.user.tag} (prefijo: ${PREFIX})`));
 
 // Alias -> nombre de comando
-const ALIASES = { p: 'play', s: 'skip', q: 'queue', files: 'archivos' };
+const ALIASES = { p: 'play', s: 'skip', q: 'queue', files: 'archivos', help: 'info', ayuda: 'info' };
+const COMMANDS = new Set(['play', 'skip', 'pause', 'resume', 'queue', 'remove', 'shuffle', 'mix', 'archivos', 'info', 'stop']);
+
+// Para no llenar el chat: se borra el comando del usuario y las respuestas del bot a los pocos segundos.
+const REPLY_TTL_MS = 10_000;
+const scheduleDelete = (msg, ms = REPLY_TTL_MS) => setTimeout(() => msg.delete().catch(() => {}), ms);
 
 client.on('messageCreate', async (message) => {
   if (message.author.bot || !message.guildId || !message.content.startsWith(PREFIX)) return;
@@ -70,9 +75,21 @@ client.on('messageCreate', async (message) => {
   const [rawName, ...rest] = message.content.slice(PREFIX.length).trim().split(/\s+/);
   const name = rawName.toLowerCase();
   const command = ALIASES[name] ?? name;
+  if (!COMMANDS.has(command)) return; // no tocar mensajes de otros bots que usen el mismo prefijo
+
   const args = rest.join(' ').trim();
   const queue = getQueue(message.guildId);
-  const reply = (content) => message.reply({ content, allowedMentions: { repliedUser: false } });
+
+  // Requiere el permiso "Gestionar mensajes"; sin él el comando simplemente se queda en el chat.
+  message.delete().catch(() => {});
+
+  // Se envía al canal (no como respuesta) porque el mensaje original ya se borró.
+  const send = (payload) => message.channel.send({ ...payload, allowedMentions: { parse: [] } });
+  const reply = async (content, ttl = REPLY_TTL_MS) => {
+    const sent = await send({ content });
+    scheduleDelete(sent, ttl);
+    return sent;
+  };
 
   try {
     switch (command) {
@@ -82,26 +99,36 @@ client.on('messageCreate', async (message) => {
         const input = args.replace(/(^|\s)--aleatorio\b/gi, ' ').trim();
         if (!input) return reply(`Dime qué reproducir. Ejemplo: \`${PREFIX}play nombre de la canción\``);
 
-        const status = await reply('🔎 Buscando...');
+        // El mensaje de estado se borra al terminar, pase lo que pase.
+        const status = await send({ content: '🔎 Buscando...' });
+        const done = async (content) => {
+          await status.edit(content).catch(() => {});
+          scheduleDelete(status);
+        };
         const spotify = parseSpotifyUrl(input);
         const local = spotify ? null : findLocalFile(input);
 
         let tracks;
-        if (spotify) {
-          tracks = await getSpotifyTracks(spotify);
-          if (!tracks.length) return status.edit('Esa lista de Spotify está vacía.');
-          if (mix) shuffle(tracks);
-        } else if (local) {
-          tracks = [local];
-        } else {
-          const track = await resolveTrack(input);
-          if (!track) return status.edit('No encontré nada.');
-          tracks = [track];
-        }
+        try {
+          if (spotify) {
+            tracks = await getSpotifyTracks(spotify);
+            if (!tracks.length) return done('Esa lista de Spotify está vacía.');
+            if (mix) shuffle(tracks);
+          } else if (local) {
+            tracks = [local];
+          } else {
+            const track = await resolveTrack(input);
+            if (!track) return done('No encontré nada.');
+            tracks = [track];
+          }
 
-        const started = await enqueue(message, tracks);
-        const label = tracks.length > 1 ? `**${tracks.length} canciones**${mix ? ' (orden aleatorio 🔀)' : ''}` : `**${tracks[0].title}**`;
-        return status.edit(started ? `▶️ Reproduciendo ${label}` : `➕ En cola: ${label}`);
+          const started = await enqueue(message, tracks);
+          const label = tracks.length > 1 ? `**${tracks.length} canciones**${mix ? ' (orden aleatorio 🔀)' : ''}` : `**${tracks[0].title}**`;
+          return done(started ? `▶️ Reproduciendo ${label}` : `➕ En cola: ${label}`);
+        } catch (err) {
+          console.error(err);
+          return done('Ocurrió un error al reproducir.');
+        }
       }
       case 'skip':
         if (!queue?.current) return reply('No hay nada sonando.');
@@ -119,7 +146,7 @@ client.on('messageCreate', async (message) => {
         if (!queue?.current) return reply('La cola está vacía.');
         const lines = queue.tracks.slice(0, 10).map((t, i) => `${i + 1}. ${t.title}`);
         const more = queue.tracks.length > 10 ? `\n…y ${queue.tracks.length - 10} más` : '';
-        return reply(`**Ahora:** ${queue.current.title}\n${lines.join('\n') || '_(nada más en cola)_'}${more}`);
+        return reply(`**Ahora:** ${queue.current.title}\n${lines.join('\n') || '_(nada más en cola)_'}${more}`, 30_000);
       }
       case 'remove': {
         const pos = Number.parseInt(args, 10);
@@ -141,12 +168,13 @@ client.on('messageCreate', async (message) => {
       }
       case 'archivos': {
         const files = listLocalFiles();
-        return reply(files.length ? `📁 Archivos en \`musica/\`:\n${files.map((f) => `• ${f}`).join('\n')}`.slice(0, 1900) : 'No hay archivos en la carpeta `musica/`.');
+        return reply(files.length ? `📁 Archivos en \`musica/\`:\n${files.map((f) => `• ${f}`).join('\n')}`.slice(0, 1900) : 'No hay archivos en la carpeta `musica/`.', 30_000);
       }
-      case 'info':
-      case 'help':
-      case 'ayuda':
-        return message.reply({ embeds: [infoEmbed], allowedMentions: { repliedUser: false } });
+      case 'info': {
+        const sent = await send({ embeds: [infoEmbed] });
+        scheduleDelete(sent, 90_000);
+        return;
+      }
       case 'stop':
         if (!queue) return reply('No hay nada sonando.');
         destroyQueue(message.guildId);
