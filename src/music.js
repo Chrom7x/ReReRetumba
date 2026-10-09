@@ -25,7 +25,16 @@ export async function resolveTrack(query) {
   return { title: result.title, url: result.url };
 }
 
-export async function enqueue(interaction, track) {
+// Fisher-Yates
+export function shuffle(arr) {
+  for (let i = arr.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [arr[i], arr[j]] = [arr[j], arr[i]];
+  }
+  return arr;
+}
+
+export async function enqueue(interaction, newTracks) {
   const channel = interaction.member.voice.channel;
   let queue = queues.get(interaction.guildId);
 
@@ -60,7 +69,7 @@ export async function enqueue(interaction, track) {
     await entersState(connection, VoiceConnectionStatus.Ready, 20_000);
   }
 
-  queue.tracks.push(track);
+  queue.tracks.push(...newTracks);
   if (queue.player.state.status === AudioPlayerStatus.Idle && !queue.current) {
     await playNext(interaction.guildId);
     return true; // empezó a sonar de inmediato
@@ -80,6 +89,12 @@ async function playNext(guildId) {
 
   queue.current = next;
   try {
+    // Las pistas de Spotify llegan solo con "query"; se buscan en YouTube al reproducirse.
+    if (!next.url) {
+      const found = await resolveTrack(next.query);
+      if (!found) throw new Error('sin resultados en YouTube');
+      next.url = found.url;
+    }
     const stream = await play.stream(next.url);
     queue.player.play(createAudioResource(stream.stream, { inputType: stream.type }));
   } catch (err) {

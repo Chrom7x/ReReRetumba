@@ -2,7 +2,8 @@ import 'dotenv/config';
 import { Client, GatewayIntentBits, MessageFlags } from 'discord.js';
 import { AudioPlayerStatus } from '@discordjs/voice';
 import ffmpegPath from 'ffmpeg-static';
-import { destroyQueue, enqueue, getQueue, resolveTrack } from './music.js';
+import { destroyQueue, enqueue, getQueue, resolveTrack, shuffle } from './music.js';
+import { getSpotifyTracks, parseSpotifyUrl } from './spotify.js';
 
 process.env.FFMPEG_PATH ??= ffmpegPath;
 
@@ -20,10 +21,24 @@ client.on('interactionCreate', async (interaction) => {
       if (!interaction.member.voice.channel) return reply('Entra primero a un canal de voz.');
       await interaction.deferReply();
       try {
-        const track = await resolveTrack(interaction.options.getString('cancion', true));
-        if (!track) return interaction.editReply('No encontré nada.');
-        const started = await enqueue(interaction, track);
-        return interaction.editReply(started ? `▶️ Reproduciendo **${track.title}**` : `➕ En cola: **${track.title}**`);
+        const input = interaction.options.getString('cancion', true);
+        const mix = interaction.options.getBoolean('mezclar') ?? false;
+        const spotify = parseSpotifyUrl(input);
+
+        let tracks;
+        if (spotify) {
+          tracks = await getSpotifyTracks(spotify);
+          if (!tracks.length) return interaction.editReply('Esa lista de Spotify está vacía.');
+          if (mix) shuffle(tracks);
+        } else {
+          const track = await resolveTrack(input);
+          if (!track) return interaction.editReply('No encontré nada.');
+          tracks = [track];
+        }
+
+        const started = await enqueue(interaction, tracks);
+        const label = tracks.length > 1 ? `**${tracks.length} canciones**${mix ? ' (mezcladas 🔀)' : ''}` : `**${tracks[0].title}**`;
+        return interaction.editReply(started ? `▶️ Reproduciendo ${label}` : `➕ En cola: ${label}`);
       } catch (err) {
         console.error(err);
         return interaction.editReply('Ocurrió un error al reproducir.');
@@ -46,6 +61,10 @@ client.on('interactionCreate', async (interaction) => {
       const lines = queue.tracks.slice(0, 10).map((t, i) => `${i + 1}. ${t.title}`);
       return reply(`**Ahora:** ${queue.current.title}\n${lines.join('\n') || '_(nada más en cola)_'}`);
     }
+    case 'shuffle':
+      if (!queue?.tracks.length) return reply('No hay canciones en cola para mezclar.');
+      shuffle(queue.tracks);
+      return reply(`🔀 Mezcladas ${queue.tracks.length} canciones.`);
     case 'stop':
       if (!queue) return reply('No hay nada sonando.');
       destroyQueue(interaction.guildId);
