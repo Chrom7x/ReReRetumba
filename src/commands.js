@@ -5,8 +5,12 @@ export const commands = [
     .setName('play')
     .setDescription('Reproduce una canción (URL de YouTube o texto de búsqueda)')
     .addStringOption((o) => o.setName('cancion').setDescription('URL (YouTube/Spotify) o búsqueda').setRequired(true))
-    .addBooleanOption((o) => o.setName('mezclar').setDescription('Mezclar el orden si es una playlist/álbum')),
-  new SlashCommandBuilder().setName('shuffle').setDescription('Mezcla las canciones que están en cola'),
+    .addBooleanOption((o) => o.setName('aleatorio').setDescription('Orden aleatorio si es una playlist/álbum')),
+  new SlashCommandBuilder().setName('shuffle').setDescription('Pone en orden aleatorio las canciones en cola'),
+  new SlashCommandBuilder()
+    .setName('mix')
+    .setDescription('Transición entre canciones (crossfade). 0 = desactivada')
+    .addIntegerOption((o) => o.setName('segundos').setDescription('Duración de la transición (0-15)').setMinValue(0).setMaxValue(15).setRequired(true)),
   new SlashCommandBuilder().setName('skip').setDescription('Salta la canción actual'),
   new SlashCommandBuilder().setName('pause').setDescription('Pausa la reproducción'),
   new SlashCommandBuilder().setName('resume').setDescription('Reanuda la reproducción'),

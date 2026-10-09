@@ -2,7 +2,7 @@ import 'dotenv/config';
 import { Client, GatewayIntentBits, MessageFlags } from 'discord.js';
 import { AudioPlayerStatus } from '@discordjs/voice';
 import ffmpegPath from 'ffmpeg-static';
-import { destroyQueue, enqueue, getQueue, resolveTrack, shuffle } from './music.js';
+import { destroyQueue, enqueue, getQueue, resolveTrack, setFade, shuffle, skip } from './music.js';
 import { getSpotifyTracks, parseSpotifyUrl } from './spotify.js';
 
 process.env.FFMPEG_PATH ??= ffmpegPath;
@@ -22,7 +22,7 @@ client.on('interactionCreate', async (interaction) => {
       await interaction.deferReply();
       try {
         const input = interaction.options.getString('cancion', true);
-        const mix = interaction.options.getBoolean('mezclar') ?? false;
+        const mix = interaction.options.getBoolean('aleatorio') ?? false;
         const spotify = parseSpotifyUrl(input);
 
         let tracks;
@@ -37,7 +37,7 @@ client.on('interactionCreate', async (interaction) => {
         }
 
         const started = await enqueue(interaction, tracks);
-        const label = tracks.length > 1 ? `**${tracks.length} canciones**${mix ? ' (mezcladas 🔀)' : ''}` : `**${tracks[0].title}**`;
+        const label = tracks.length > 1 ? `**${tracks.length} canciones**${mix ? ' (orden aleatorio 🔀)' : ''}` : `**${tracks[0].title}**`;
         return interaction.editReply(started ? `▶️ Reproduciendo ${label}` : `➕ En cola: ${label}`);
       } catch (err) {
         console.error(err);
@@ -46,8 +46,13 @@ client.on('interactionCreate', async (interaction) => {
     }
     case 'skip':
       if (!queue?.current) return reply('No hay nada sonando.');
-      queue.player.stop(); // dispara Idle -> siguiente
+      skip(queue);
       return reply('⏭️ Saltada.');
+    case 'mix': {
+      const seconds = interaction.options.getInteger('segundos', true);
+      setFade(interaction.guildId, seconds);
+      return reply(seconds ? `🎚️ Transición de ${seconds}s entre canciones (aplica desde la próxima canción).` : '🎚️ Transiciones desactivadas.');
+    }
     case 'pause':
       if (!queue) return reply('No hay nada sonando.');
       queue.player.pause();
