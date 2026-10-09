@@ -1,5 +1,5 @@
 import 'dotenv/config';
-import { Client, GatewayIntentBits, MessageFlags } from 'discord.js';
+import { Client, EmbedBuilder, GatewayIntentBits, MessageFlags } from 'discord.js';
 import { AudioPlayerStatus } from '@discordjs/voice';
 import ffmpegPath from 'ffmpeg-static';
 import { destroyQueue, enqueue, getQueue, resolveTrack, setFade, shuffle, skip } from './music.js';
@@ -8,6 +8,48 @@ import { getSpotifyTracks, parseSpotifyUrl } from './spotify.js';
 process.env.FFMPEG_PATH ??= ffmpegPath;
 
 const client = new Client({ intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildVoiceStates] });
+
+const infoEmbed = new EmbedBuilder()
+  .setTitle('🎵 Cómo usar el bot de música')
+  .setDescription('Escribe `/` en el chat y elige un comando. Para usar `/play` debes estar **dentro de un canal de voz**.')
+  .addFields(
+    {
+      name: '▶️ Reproducir',
+      value: [
+        '`/play cancion:<nombre o enlace>` — reproduce o agrega a la cola. Acepta un nombre, un enlace de YouTube o un enlace de **Spotify** (canción, álbum o playlist pública).',
+        'Opción `aleatorio:True` — pone en orden aleatorio una playlist o un álbum.',
+      ].join('\n'),
+    },
+    {
+      name: '🎛️ Control',
+      value: [
+        '`/pause` — pausa la música.',
+        '`/resume` — la reanuda.',
+        '`/skip` — salta la canción actual (con un fundido corto).',
+        '`/stop` — detiene todo, vacía la cola y el bot sale del canal.',
+      ].join('\n'),
+    },
+    {
+      name: '📋 Cola',
+      value: [
+        '`/queue` — muestra la canción actual y las próximas 10.',
+        '`/remove posicion:<número>` — quita una canción de la cola antes de que suene. Elige de la lista que aparece o escribe parte del nombre.',
+        '`/shuffle` — pone en orden aleatorio lo que ya está en cola.',
+      ].join('\n'),
+    },
+    {
+      name: '🎚️ Transiciones',
+      value: '`/mix segundos:<0-15>` — duración de la transición (crossfade) entre canciones. `0` la desactiva. Por defecto: 6.',
+    },
+    {
+      name: 'ℹ️ Ten en cuenta',
+      value: [
+        '• `/remove` no alcanza la canción que ya se está preparando, justo antes de que empiece. En ese caso usa `/skip` cuando suene.',
+        '• Las playlists de Spotify deben ser públicas y se leen hasta unas 100 canciones.',
+        '• El audio viene de YouTube, así que la versión puede variar respecto a Spotify.',
+      ].join('\n'),
+    },
+  );
 
 client.once('clientReady', (c) => console.log(`Conectado como ${c.user.tag}`));
 
@@ -77,6 +119,8 @@ client.on('interactionCreate', async (interaction) => {
       const lines = queue.tracks.slice(0, 10).map((t, i) => `${i + 1}. ${t.title}`);
       return reply(`**Ahora:** ${queue.current.title}\n${lines.join('\n') || '_(nada más en cola)_'}`);
     }
+    case 'info':
+      return interaction.reply({ embeds: [infoEmbed] });
     case 'remove': {
       const pos = interaction.options.getInteger('posicion', true);
       if (!queue?.tracks.length) return reply('La cola está vacía.');

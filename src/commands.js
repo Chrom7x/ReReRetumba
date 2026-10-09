@@ -21,5 +21,6 @@ export const commands = [
   new SlashCommandBuilder().setName('pause').setDescription('Pausa la reproducción'),
   new SlashCommandBuilder().setName('resume').setDescription('Reanuda la reproducción'),
   new SlashCommandBuilder().setName('queue').setDescription('Muestra la cola'),
+  new SlashCommandBuilder().setName('info').setDescription('Explica todos los comandos del bot y cómo usarlos'),
   new SlashCommandBuilder().setName('stop').setDescription('Detiene la música y limpia la cola'),
 ].map((c) => c.toJSON());
