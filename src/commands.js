@@ -6,6 +6,12 @@ export const commands = [
     .setDescription('Reproduce una canción (URL de YouTube o texto de búsqueda)')
     .addStringOption((o) => o.setName('cancion').setDescription('URL (YouTube/Spotify) o búsqueda').setRequired(true))
     .addBooleanOption((o) => o.setName('aleatorio').setDescription('Orden aleatorio si es una playlist/álbum')),
+  new SlashCommandBuilder()
+    .setName('remove')
+    .setDescription('Quita una canción de la cola antes de que suene')
+    .addIntegerOption((o) =>
+      o.setName('posicion').setDescription('Número en /queue (o elige de la lista)').setMinValue(1).setAutocomplete(true).setRequired(true),
+    ),
   new SlashCommandBuilder().setName('shuffle').setDescription('Pone en orden aleatorio las canciones en cola'),
   new SlashCommandBuilder()
     .setName('mix')

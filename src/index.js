@@ -12,6 +12,17 @@ const client = new Client({ intents: [GatewayIntentBits.Guilds, GatewayIntentBit
 client.once('clientReady', (c) => console.log(`Conectado como ${c.user.tag}`));
 
 client.on('interactionCreate', async (interaction) => {
+  // Sugerencias para /remove: las canciones en cola, filtradas por lo que se vaya escribiendo.
+  if (interaction.isAutocomplete() && interaction.commandName === 'remove') {
+    const typed = interaction.options.getFocused().toLowerCase();
+    const tracks = getQueue(interaction.guildId)?.tracks ?? [];
+    const choices = tracks
+      .map((t, i) => ({ name: `${i + 1}. ${t.title}`.slice(0, 100), value: i + 1 }))
+      .filter((c) => c.name.toLowerCase().includes(typed))
+      .slice(0, 25);
+    return interaction.respond(choices);
+  }
+
   if (!interaction.isChatInputCommand() || !interaction.guildId) return;
   const queue = getQueue(interaction.guildId);
   const reply = (content) => interaction.reply({ content, flags: MessageFlags.Ephemeral });
@@ -65,6 +76,13 @@ client.on('interactionCreate', async (interaction) => {
       if (!queue?.current) return reply('La cola está vacía.');
       const lines = queue.tracks.slice(0, 10).map((t, i) => `${i + 1}. ${t.title}`);
       return reply(`**Ahora:** ${queue.current.title}\n${lines.join('\n') || '_(nada más en cola)_'}`);
+    }
+    case 'remove': {
+      const pos = interaction.options.getInteger('posicion', true);
+      if (!queue?.tracks.length) return reply('La cola está vacía.');
+      if (pos > queue.tracks.length) return reply(`Solo hay ${queue.tracks.length} canciones en cola.`);
+      const [removed] = queue.tracks.splice(pos - 1, 1);
+      return reply(`🗑️ Quitada de la cola: **${removed.title}**`);
     }
     case 'shuffle':
       if (!queue?.tracks.length) return reply('No hay canciones en cola para mezclar.');
