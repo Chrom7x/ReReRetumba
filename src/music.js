@@ -22,6 +22,7 @@ const execFileAsync = promisify(execFile);
 const BYTES_PER_SEC = 48000 * 2 * 2; // PCM s16le, 48 kHz, estéreo
 const SKIP_FADE_SECONDS = 2;
 const DEFAULT_FADE_SECONDS = 6;
+const IDLE_LEAVE_MS = 5 * 60 * 1000; // minutos que el bot espera en el canal tras terminar la cola
 
 const queues = new Map();
 const fadeByGuild = new Map();
@@ -250,7 +251,7 @@ export async function enqueue(interaction, newTracks) {
       q.streaming = false;
       q.current = null;
       if (q.tracks.length) startStream(q);
-      else destroyQueue(guildId);
+      else q.idleTimer = setTimeout(() => destroyQueue(guildId), IDLE_LEAVE_MS); // se queda un rato por si piden otra
     });
     player.on('error', (err) => console.error('Error del reproductor:', err.message));
     connection.on(VoiceConnectionStatus.Disconnected, async () => {
@@ -267,6 +268,7 @@ export async function enqueue(interaction, newTracks) {
     await entersState(connection, VoiceConnectionStatus.Ready, 20_000);
   }
 
+  clearTimeout(queue.idleTimer);
   queue.tracks.push(...newTracks);
   if (!queue.streaming) {
     startStream(queue);
@@ -285,6 +287,7 @@ export function destroyQueue(guildId) {
   const queue = queues.get(guildId);
   if (!queue) return;
   queues.delete(guildId);
+  clearTimeout(queue.idleTimer);
   queue.tracks.length = 0;
   queue.reader?.close();
   queue.player.stop(true);
