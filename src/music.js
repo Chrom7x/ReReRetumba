@@ -86,16 +86,22 @@ class PcmReader {
   // `track.file` = archivo local (ffmpeg lo lee directo); si no, el audio llega por yt-dlp desde `track.url`.
   constructor(track) {
     this.skipped = false;
+    this.track = track;
+    this.errText = ''; // últimas líneas de error de yt-dlp/ffmpeg, para diagnosticar fallos
+    const keepErr = (d) => (this.errText = (this.errText + d).slice(-800));
     this.ytdlp = track.file
       ? null
       : spawn(YTDLP, ['-f', 'bestaudio/best', '--no-playlist', '--js-runtimes', 'node', '-q', '-o', '-', track.url], {
-          stdio: ['ignore', 'pipe', 'ignore'],
+          stdio: ['ignore', 'pipe', 'pipe'],
         });
+    this.ytdlp?.stderr.on('data', keepErr);
+    this.ytdlp?.on('error', (e) => keepErr(`no se pudo ejecutar yt-dlp: ${e.message}`));
     this.ff = spawn(
       ffmpegPath,
       ['-loglevel', 'error', '-i', track.file ?? 'pipe:0', '-af', 'silenceremove=start_periods=1:start_threshold=-50dB', '-f', 's16le', '-ar', '48000', '-ac', '2', 'pipe:1'],
-      { stdio: [track.file ? 'ignore' : 'pipe', 'pipe', 'ignore'] },
+      { stdio: [track.file ? 'ignore' : 'pipe', 'pipe', 'pipe'] },
     );
+    this.ff.stderr.on('data', keepErr);
     if (this.ytdlp) {
       this.ytdlp.stdout.pipe(this.ff.stdin);
       this.ff.stdin.on('error', () => {});
@@ -199,13 +205,16 @@ export async function* mixTracks(queue) {
     const fade = Math.floor((getFade(queue.guildId) * BYTES_PER_SEC) / 4) * 4;
     let hold = Buffer.alloc(0);
     let c;
+    let got = 0;
     while ((c = await reader.chunk())) {
+      got += c.length;
       hold = hold.length ? Buffer.concat([hold, c]) : c;
       if (hold.length > fade) {
         yield hold.subarray(0, hold.length - fade);
         hold = hold.subarray(hold.length - fade);
       }
     }
+    if (!got && !reader.skipped) console.error(`Audio vacío para "${reader.track.title}":`, reader.errText.trim() || '(sin mensaje de error)');
     if (reader.skipped) hold = hold.subarray(0, Math.min(hold.length, SKIP_FADE_SECONDS * BYTES_PER_SEC));
 
     const next = await nextReader(queue);
