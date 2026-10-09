@@ -1,4 +1,6 @@
 import { execFile, spawn } from 'node:child_process';
+import { readdirSync } from 'node:fs';
+import { join } from 'node:path';
 import { Readable } from 'node:stream';
 import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
@@ -47,6 +49,26 @@ export async function resolveTrack(query) {
   }
 }
 
+// ---- Archivos locales (carpeta musica/) ------------------------------------
+
+const LOCAL_DIR = fileURLToPath(new URL('../musica/', import.meta.url));
+const AUDIO_EXT = /\.(mp3|wav|flac|m4a|ogg|opus|aac)$/i;
+
+export function listLocalFiles() {
+  try {
+    return readdirSync(LOCAL_DIR).filter((f) => AUDIO_EXT.test(f));
+  } catch {
+    return [];
+  }
+}
+
+// Busca por nombre (con o sin extensión, sin distinguir mayúsculas). Solo dentro de musica/.
+export function findLocalFile(name) {
+  const wanted = name.trim().toLowerCase();
+  const file = listLocalFiles().find((f) => f.toLowerCase() === wanted || f.replace(AUDIO_EXT, '').toLowerCase() === wanted);
+  return file ? { title: file.replace(AUDIO_EXT, ''), file: join(LOCAL_DIR, file) } : null;
+}
+
 // Fisher-Yates
 export function shuffle(arr) {
   for (let i = arr.length - 1; i > 0; i--) {
@@ -60,19 +82,24 @@ export function shuffle(arr) {
 
 // Lector de PCM alineado a frames de 4 bytes (2 canales x 16 bits) sobre un proceso ffmpeg.
 class PcmReader {
-  constructor(url) {
+  // `track.file` = archivo local (ffmpeg lo lee directo); si no, el audio llega por yt-dlp desde `track.url`.
+  constructor(track) {
     this.skipped = false;
-    this.ytdlp = spawn(YTDLP, ['-f', 'bestaudio', '--no-playlist', '--js-runtimes', 'node', '-q', '-o', '-', url], {
-      stdio: ['ignore', 'pipe', 'ignore'],
-    });
+    this.ytdlp = track.file
+      ? null
+      : spawn(YTDLP, ['-f', 'bestaudio/best', '--no-playlist', '--js-runtimes', 'node', '-q', '-o', '-', track.url], {
+          stdio: ['ignore', 'pipe', 'ignore'],
+        });
     this.ff = spawn(
       ffmpegPath,
-      ['-loglevel', 'error', '-i', 'pipe:0', '-af', 'silenceremove=start_periods=1:start_threshold=-50dB', '-f', 's16le', '-ar', '48000', '-ac', '2', 'pipe:1'],
-      { stdio: ['pipe', 'pipe', 'ignore'] },
+      ['-loglevel', 'error', '-i', track.file ?? 'pipe:0', '-af', 'silenceremove=start_periods=1:start_threshold=-50dB', '-f', 's16le', '-ar', '48000', '-ac', '2', 'pipe:1'],
+      { stdio: [track.file ? 'ignore' : 'pipe', 'pipe', 'ignore'] },
     );
-    this.ytdlp.stdout.pipe(this.ff.stdin);
-    this.ff.stdin.on('error', () => {});
-    this.ytdlp.on('error', () => this.ff.kill());
+    if (this.ytdlp) {
+      this.ytdlp.stdout.pipe(this.ff.stdin);
+      this.ff.stdin.on('error', () => {});
+      this.ytdlp.on('error', () => this.ff.kill());
+    }
     this.iter = this.ff.stdout[Symbol.asyncIterator]();
     this.rest = null;
     this.carry = Buffer.alloc(0);
@@ -120,7 +147,7 @@ class PcmReader {
   }
 
   close() {
-    this.ytdlp.kill();
+    this.ytdlp?.kill();
     this.ff.kill();
   }
 }
@@ -148,13 +175,13 @@ async function nextReader(queue) {
     const track = queue.tracks.shift();
     try {
       // Las pistas de Spotify llegan solo con "query"; se buscan en YouTube al reproducirse.
-      if (!track.url) {
+      if (!track.file && !track.url) {
         const found = await resolveTrack(track.query);
         if (!found) throw new Error('sin resultados en YouTube');
         track.url = found.url;
       }
       queue.current = track;
-      return new PcmReader(track.url);
+      return new PcmReader(track);
     } catch (err) {
       console.error('No se pudo reproducir', track.title, err.message);
     }

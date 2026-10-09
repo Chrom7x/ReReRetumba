@@ -4,7 +4,9 @@ export const commands = [
   new SlashCommandBuilder()
     .setName('play')
     .setDescription('Reproduce una canción (URL de YouTube o texto de búsqueda)')
-    .addStringOption((o) => o.setName('cancion').setDescription('URL (YouTube/Spotify) o búsqueda').setRequired(true))
+    .addStringOption((o) =>
+      o.setName('cancion').setDescription('URL (YouTube/Spotify), búsqueda o archivo .mp3 de la carpeta musica').setRequired(true).setAutocomplete(true),
+    )
     .addBooleanOption((o) => o.setName('aleatorio').setDescription('Orden aleatorio si es una playlist/álbum')),
   new SlashCommandBuilder()
     .setName('remove')

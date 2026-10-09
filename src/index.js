@@ -2,7 +2,7 @@ import 'dotenv/config';
 import { Client, EmbedBuilder, GatewayIntentBits, MessageFlags } from 'discord.js';
 import { AudioPlayerStatus } from '@discordjs/voice';
 import ffmpegPath from 'ffmpeg-static';
-import { destroyQueue, enqueue, getQueue, resolveTrack, setFade, shuffle, skip } from './music.js';
+import { destroyQueue, enqueue, findLocalFile, getQueue, listLocalFiles, resolveTrack, setFade, shuffle, skip } from './music.js';
 import { getSpotifyTracks, parseSpotifyUrl } from './spotify.js';
 
 process.env.FFMPEG_PATH ??= ffmpegPath;
@@ -16,7 +16,7 @@ const infoEmbed = new EmbedBuilder()
     {
       name: '▶️ Reproducir',
       value: [
-        '`/play cancion:<nombre o enlace>` — reproduce o agrega a la cola. Acepta un nombre, un enlace de YouTube o un enlace de **Spotify** (canción, álbum o playlist pública).',
+        '`/play cancion:<nombre o enlace>` — reproduce o agrega a la cola. Acepta un nombre, un enlace de YouTube, un enlace de **Spotify** (canción, álbum o playlist pública), un enlace de un **reel de Instagram** (público) o un **archivo .mp3** de la carpeta `musica/` (al escribir `/play` aparecen los archivos disponibles con 📁).',
         'Opción `aleatorio:True` — pone en orden aleatorio una playlist o un álbum.',
       ].join('\n'),
     },
@@ -65,6 +65,17 @@ client.on('interactionCreate', async (interaction) => {
     return interaction.respond(choices);
   }
 
+  // Sugerencias para /play: archivos de la carpeta musica/ que coincidan. El texto escrito
+  // va primero para que la búsqueda libre y los enlaces sigan funcionando.
+  if (interaction.isAutocomplete() && interaction.commandName === 'play') {
+    const typed = interaction.options.getFocused();
+    const files = listLocalFiles()
+      .filter((f) => f.toLowerCase().includes(typed.toLowerCase()))
+      .map((f) => ({ name: `📁 ${f}`.slice(0, 100), value: f.slice(0, 100) }));
+    const choices = typed ? [{ name: typed.slice(0, 100), value: typed.slice(0, 100) }, ...files] : files;
+    return interaction.respond(choices.slice(0, 25));
+  }
+
   if (!interaction.isChatInputCommand() || !interaction.guildId) return;
   const queue = getQueue(interaction.guildId);
   const reply = (content) => interaction.reply({ content, flags: MessageFlags.Ephemeral });
@@ -83,6 +94,8 @@ client.on('interactionCreate', async (interaction) => {
           tracks = await getSpotifyTracks(spotify);
           if (!tracks.length) return interaction.editReply('Esa lista de Spotify está vacía.');
           if (mix) shuffle(tracks);
+        } else if (findLocalFile(input)) {
+          tracks = [findLocalFile(input)];
         } else {
           const track = await resolveTrack(input);
           if (!track) return interaction.editReply('No encontré nada.');
