@@ -30,6 +30,15 @@ if (process.env.YT_COOKIES_B64) {
 
 const BYTES_PER_SEC = 48000 * 2 * 2; // PCM s16le, 48 kHz, estéreo
 const SKIP_FADE_SECONDS = 2;
+const NOTICE_TTL_MS = 20_000;
+
+// Aviso en el canal de texto donde se pidió la música; se borra solo para no llenar el chat.
+function notify(queue, content) {
+  queue.textChannel
+    ?.send({ content, allowedMentions: { parse: [] } })
+    .then((msg) => setTimeout(() => msg.delete().catch(() => {}), NOTICE_TTL_MS))
+    .catch(() => {});
+}
 const DEFAULT_FADE_SECONDS = 6;
 const PREFETCH_LEAD_SECONDS = 30; // cuánto antes de acabar una canción se empieza a cargar la siguiente
 const IDLE_LEAVE_MS = 5 * 60 * 1000; // minutos que el bot espera en el canal tras terminar la cola
@@ -208,6 +217,7 @@ async function nextReader(queue) {
       return new PcmReader(track);
     } catch (err) {
       console.error('No se pudo reproducir', track.title, err.message);
+      notify(queue, `⚠️ No encontré **${track.title}**, la salto.`);
     }
   }
   return null;
@@ -246,7 +256,16 @@ export async function* mixTracks(queue) {
         hold = hold.subarray(hold.length - fade);
       }
     }
-    if (!got && !reader.skipped) console.error(`Audio vacío para "${reader.track.title}":`, reader.errText.trim() || '(sin mensaje de error)');
+    if (!got && !reader.skipped) {
+      console.error(`Audio vacío para "${reader.track.title}":`, reader.errText.trim() || '(sin mensaje de error)');
+      const blocked = /not a bot|429|Too Many Requests/i.test(reader.errText);
+      notify(
+        queue,
+        blocked
+          ? `⚠️ YouTube está bloqueando al bot y no pude reproducir **${reader.track.title}**. Prueba de nuevo en un rato.`
+          : `⚠️ No pude reproducir **${reader.track.title}**, la salto.`,
+      );
+    }
     if (reader.skipped) hold = hold.subarray(0, Math.min(hold.length, SKIP_FADE_SECONDS * BYTES_PER_SEC));
 
     // Si no había nada en cola al prefetchear, se revisa de nuevo por si pidieron algo en el último rato.
@@ -322,6 +341,7 @@ export async function enqueue(interaction, newTracks) {
   }
 
   clearTimeout(queue.idleTimer);
+  queue.textChannel = interaction.channel; // donde avisar si una canción falla
   queue.tracks.push(...newTracks);
   if (!queue.streaming) {
     startStream(queue);
