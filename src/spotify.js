@@ -30,11 +30,21 @@ async function getToken() {
 
 async function api(url) {
   const res = await fetch(url, { headers: { Authorization: `Bearer ${await getToken()}` } });
-  if (!res.ok) throw new Error(`Spotify respondió ${res.status} (¿la playlist es privada?)`);
+  if (!res.ok) throw new Error(`Spotify respondió ${res.status}`);
   return res.json();
 }
 
-const toTrack = (t) => (t?.name ? { query: `${t.name} ${t.artists?.map((a) => a.name).join(' ') ?? ''}`.trim(), title: `${t.name} - ${t.artists?.[0]?.name ?? ''}` } : null);
+const toTrack = (t) => {
+  if (!t?.name) return null;
+  const artists = t.artists?.map((a) => a.name) ?? [];
+  return {
+    query: `${t.name} ${artists.join(' ')}`.trim(),
+    title: t.name,
+    author: artists.join(', ') || null,
+    duration: t.duration_ms ? Math.round(t.duration_ms / 1000) : null,
+    thumbnail: t.album?.images?.[0]?.url ?? null,
+  };
+};
 
 // Spotify cerró /playlists/{id}/tracks a apps sin usuario logueado (403/401), así que las
 // playlists públicas se leen de la página embed, que no requiere login (máx. ~100 pistas).
@@ -44,7 +54,12 @@ async function getPlaylistFromEmbed(id) {
   const m = /<script id="__NEXT_DATA__"[^>]*>(.*?)<\/script>/s.exec(await res.text());
   const list = m && JSON.parse(m[1]).props?.pageProps?.state?.data?.entity?.trackList;
   if (!list) throw new Error('No pude leer la playlist (¿es privada?)');
-  return list.map((t) => ({ query: `${t.title} ${t.subtitle}`.trim(), title: `${t.title} - ${t.subtitle}` }));
+  return list.map((t) => ({
+    query: `${t.title} ${t.subtitle}`.trim(),
+    title: t.title,
+    author: t.subtitle || null,
+    duration: t.duration ? Math.round(t.duration / 1000) : null,
+  }));
 }
 
 // Devuelve [{ title, query }] sin resolver a YouTube todavía (se resuelve al reproducir).
