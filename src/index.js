@@ -59,7 +59,7 @@ const infoEmbed = new EmbedBuilder()
     },
   );
 
-client.once('clientReady', (c) => console.log(`Conectado como ${c.user.tag} (prefijo: ${PREFIX})`));
+client.once('clientReady', (c) => console.log(`Conectado como ${c.user.tag} (prefijo: ${PREFIX}) en ${c.guilds.cache.size} servidor(es)`));
 
 // Alias -> nombre de comando
 const ALIASES = { p: 'play', s: 'skip', q: 'queue', files: 'archivos', help: 'info', ayuda: 'info' };
@@ -76,6 +76,7 @@ client.on('messageCreate', async (message) => {
   const name = rawName.toLowerCase();
   const command = ALIASES[name] ?? name;
   if (!COMMANDS.has(command)) return; // no tocar mensajes de otros bots que usen el mismo prefijo
+  console.log(`[cmd] ${message.author.tag}: ${message.content.slice(0, 120)}`);
 
   const args = rest.join(' ').trim();
   const queue = getQueue(message.guildId);
