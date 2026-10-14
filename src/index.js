@@ -327,6 +327,23 @@ client.on('interactionCreate', async (interaction) => {
 // Pausa y sale si el canal de voz se queda vacío; reanuda si alguien vuelve.
 client.on('voiceStateUpdate', (oldState, newState) => checkVoiceChannel(newState.guild ?? oldState.guild));
 
+// Railway envía SIGTERM al reemplazar el contenedor en cada despliegue: se sale de los canales de voz y
+// se dejan los paneles en espera antes de terminar (sin esto npm lo registra como "command failed").
+let shuttingDown = false;
+async function shutdown(signal) {
+  if (shuttingDown) return;
+  shuttingDown = true;
+  console.log(`[bot] ${signal} recibido: apagando con orden`);
+  setTimeout(() => process.exit(0), 5_000).unref(); // por si Discord no responde
+  for (const guildId of client.guilds.cache.keys()) destroyQueue(guildId, 'reinicio del bot');
+  const panels = guildsWithPanel().map((id) => client.guilds.cache.get(id)).filter(Boolean);
+  await Promise.allSettled(panels.map((guild) => showIdlePanel(guild)));
+  await client.destroy();
+  process.exit(0);
+}
+process.once('SIGTERM', () => shutdown('SIGTERM'));
+process.once('SIGINT', () => shutdown('SIGINT'));
+
 // Un error suelto no debe tumbar el bot (Railway lo reiniciaría y saldría del canal de voz).
 process.on('unhandledRejection', (err) => console.error('unhandledRejection:', err));
 process.on('uncaughtException', (err) => console.error('uncaughtException:', err));
