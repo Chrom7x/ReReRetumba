@@ -1,6 +1,11 @@
-// Un único mensaje "Sonando ahora" por servidor: al cambiar de canción se borra el anterior y se
-// publica uno nuevo (queda al final del chat); entre medias solo se edita la barra de progreso.
-import { nowPlayingPayload } from './ui.js';
+// El mensaje "Sonando ahora", en uno de dos modos:
+// - Chat: un único mensaje en el canal donde se pidió la música; al cambiar de canción se borra y
+//   se publica de nuevo (queda al final del chat).
+// - Panel (si el servidor hizo !setup): un mensaje fijo en el canal de control que solo se edita;
+//   cuando no suena nada vuelve al estado de espera.
+import { PREFIX } from './config.js';
+import { getSettings, updateSettings } from './settings.js';
+import { idlePanelPayload, nowPlayingPayload } from './ui.js';
 
 const TICK_MS = 5_000;
 const EDIT_EVERY_MS = 15_000;
@@ -15,7 +20,35 @@ export function nowPlaying(queue) {
   return entry ? { track: entry.track, elapsedSec: Math.max(0, (ms - entry.startMs) / 1000) } : null;
 }
 
-function render(queue, np) {
+// ---- Panel de control ---------------------------------------------------------
+
+export function panelChannel(guild) {
+  const id = getSettings(guild.id).controlChannelId;
+  return id ? (guild.channels.cache.get(id) ?? null) : null;
+}
+
+// Mensaje fijo del panel; si alguien lo borró, se vuelve a crear.
+export async function ensurePanelMessage(guild) {
+  const channel = panelChannel(guild);
+  if (!channel) return null;
+  const { controlMessageId } = getSettings(guild.id);
+  if (controlMessageId) {
+    const existing = await channel.messages.fetch(controlMessageId).catch(() => null);
+    if (existing) return existing;
+  }
+  const msg = await channel.send(idlePanelPayload(guild.client.user, PREFIX));
+  updateSettings(guild.id, { controlMessageId: msg.id });
+  return msg;
+}
+
+export async function showIdlePanel(guild) {
+  const msg = await ensurePanelMessage(guild).catch((err) => console.error('[panel]', err.message));
+  await msg?.edit(idlePanelPayload(guild.client.user, PREFIX)).catch(() => {});
+}
+
+// ---- Actualización periódica ----------------------------------------------------
+
+function render(queue, np, withUpcoming) {
   return nowPlayingPayload({
     track: np.track,
     elapsedSec: np.elapsedSec,
@@ -25,26 +58,51 @@ function render(queue, np) {
     loop: queue.loop,
     fade: queue.getFade(),
     hasHistory: queue.history.length > 0,
+    upcoming: withUpcoming ? queue.tracks : undefined,
   });
 }
 
+async function tickPanel(queue, np, force) {
+  queue.npMessage ??= await ensurePanelMessage(queue.guild);
+  if (!queue.npMessage) return;
+  const changed = np.track !== queue.npTrack;
+  if (changed || force || (!queue.paused && Date.now() - queue.npEditedAt >= EDIT_EVERY_MS)) {
+    await queue.npMessage.edit(render(queue, np, true));
+    queue.npTrack = np.track;
+    queue.npEditedAt = Date.now();
+  }
+}
+
+async function tickChat(queue, np, force) {
+  if (!queue.textChannel) return;
+  if (np.track !== queue.npTrack || !queue.npMessage) {
+    queue.npTrack = np.track;
+    const old = queue.npMessage;
+    queue.npMessage = null;
+    old?.delete().catch(() => {});
+    queue.npMessage = await queue.textChannel.send(render(queue, np, false));
+    queue.npEditedAt = Date.now();
+  } else if (force || (!queue.paused && Date.now() - queue.npEditedAt >= EDIT_EVERY_MS)) {
+    await queue.npMessage.edit(render(queue, np, false));
+    queue.npEditedAt = Date.now();
+  }
+}
+
 async function tick(queue, force = false) {
-  if (queue.npBusy || !queue.textChannel) return;
+  if (queue.npBusy) return;
   queue.npBusy = true;
   try {
     const np = nowPlaying(queue);
     if (!np) return;
-    if (np.track !== queue.npTrack || !queue.npMessage) {
-      queue.npTrack = np.track;
-      const old = queue.npMessage;
+    const usePanel = Boolean(queue.guild && panelChannel(queue.guild));
+    if (usePanel !== queue.npPanelMode) {
+      // Se activó o quitó el panel mientras sonaba: se suelta el mensaje del modo anterior.
+      if (!queue.npPanelMode) queue.npMessage?.delete().catch(() => {});
       queue.npMessage = null;
-      old?.delete().catch(() => {});
-      queue.npMessage = await queue.textChannel.send(render(queue, np));
-      queue.npEditedAt = Date.now();
-    } else if (force || (!queue.paused && Date.now() - queue.npEditedAt >= EDIT_EVERY_MS)) {
-      await queue.npMessage.edit(render(queue, np));
-      queue.npEditedAt = Date.now();
+      queue.npTrack = null;
+      queue.npPanelMode = usePanel;
     }
+    await (usePanel ? tickPanel(queue, np, force) : tickChat(queue, np, force));
   } catch (err) {
     if (err.code === UNKNOWN_MESSAGE) queue.npMessage = null; // alguien lo borró: se vuelve a publicar
     else console.error('[np] no se pudo actualizar:', err.message);
@@ -64,16 +122,17 @@ export function refreshNowPlaying(queue) {
   return tick(queue, true);
 }
 
-// Vuelve a publicar el mensaje al final del chat.
+// Vuelve a publicar el reproductor al final del chat (en el panel basta con actualizarlo).
 export function repostNowPlaying(queue) {
-  queue.npTrack = null;
-  return tick(queue);
+  if (!queue.npPanelMode) queue.npTrack = null;
+  return tick(queue, true);
 }
 
 export function clearNowPlaying(queue) {
   clearInterval(queue.npTimer);
   queue.npTimer = null;
   queue.npTrack = null;
-  queue.npMessage?.delete().catch(() => {});
+  if (queue.npPanelMode && queue.guild) showIdlePanel(queue.guild);
+  else queue.npMessage?.delete().catch(() => {});
   queue.npMessage = null;
 }

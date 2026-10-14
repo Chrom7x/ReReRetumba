@@ -1,30 +1,27 @@
 import 'dotenv/config';
 import { Client, EmbedBuilder, GatewayIntentBits, MessageFlags, PermissionFlagsBits } from 'discord.js';
 import ffmpegPath from 'ffmpeg-static';
+import { handlePlay } from './commands/play.js';
+import { handleSetup } from './commands/setup.js';
+import { PREFIX } from './config.js';
 import {
   checkVoiceChannel,
   destroyQueue,
-  enqueue,
-  findLocalFile,
   getQueue,
   inBotChannel,
   listLocalFiles,
   previous,
-  resolveTrack,
   setFade,
   setLoop,
   shuffle,
   skip,
   togglePause,
-  voiceProblem,
 } from './music.js';
-import { nowPlaying, refreshNowPlaying, repostNowPlaying } from './nowplaying.js';
-import { getSpotifyTracks, parseSpotifyUrl } from './spotify.js';
-import { COLORS, LOOP_LABELS, notice, queueEmbed, trackLine } from './ui.js';
+import { nowPlaying, panelChannel, refreshNowPlaying, repostNowPlaying, showIdlePanel } from './nowplaying.js';
+import { getSettings, guildsWithPanel, updateSettings } from './settings.js';
+import { COLORS, LOOP_LABELS, notice, queueEmbed } from './ui.js';
 
 process.env.FFMPEG_PATH ??= ffmpegPath;
-
-const PREFIX = process.env.PREFIX || '!';
 
 const client = new Client({
   intents: [
@@ -71,6 +68,13 @@ const infoEmbed = new EmbedBuilder()
     },
     { name: '🎚️ Transiciones', value: `\`${PREFIX}mix <0-15>\` — segundos de transición entre canciones. \`0\` la desactiva. Por defecto: 6.` },
     {
+      name: '⚙️ Panel de control (administradores)',
+      value: [
+        `\`${PREFIX}setup\` — crea el canal **#🎶・reproductor**: un reproductor fijo donde basta con escribir el nombre de una canción.`,
+        `\`${PREFIX}setup quitar\` — lo desactiva y la música vuelve a mostrarse en el chat.`,
+      ].join('\n'),
+    },
+    {
       name: 'ℹ️ Ten en cuenta',
       value: [
         '• Las playlists de Spotify deben ser públicas y se leen hasta unas 100 canciones.',
@@ -80,7 +84,37 @@ const infoEmbed = new EmbedBuilder()
     },
   );
 
-client.once('clientReady', (c) => console.log(`Conectado como ${c.user.tag} (prefijo: ${PREFIX}) en ${c.guilds.cache.size} servidor(es)`));
+client.once('clientReady', async (c) => {
+  console.log(`Conectado como ${c.user.tag} (prefijo: ${PREFIX}) en ${c.guilds.cache.size} servidor(es)`);
+  // Tras un reinicio no suena nada: cada panel vuelve al estado de espera (y se recrea si lo borraron).
+  for (const guildId of guildsWithPanel()) {
+    const guild = c.guilds.cache.get(guildId);
+    if (!guild) continue;
+    if (!panelChannel(guild)) {
+      console.log(`[panel] el canal del panel ya no existe en ${guild.name}; se quita la configuración`);
+      updateSettings(guildId, { controlChannelId: null, controlMessageId: null });
+      continue;
+    }
+    await showIdlePanel(guild);
+  }
+});
+
+// Si borran el canal del panel, se vuelve al modo chat.
+client.on('channelDelete', (channel) => {
+  if (!channel.guild || getSettings(channel.guild.id).controlChannelId !== channel.id) return;
+  updateSettings(channel.guild.id, { controlChannelId: null, controlMessageId: null });
+  const queue = getQueue(channel.guild.id);
+  if (queue) refreshNowPlaying(queue);
+});
+
+// Si borran el mensaje del panel, se vuelve a publicar.
+client.on('messageDelete', (msg) => {
+  if (!msg.guildId || getSettings(msg.guildId).controlMessageId !== msg.id) return;
+  updateSettings(msg.guildId, { controlMessageId: null });
+  const queue = getQueue(msg.guildId);
+  if (queue) refreshNowPlaying(queue);
+  else if (msg.guild) showIdlePanel(msg.guild);
+});
 
 // Alias -> nombre de comando
 const ALIASES = {
@@ -97,7 +131,7 @@ const ALIASES = {
   repeat: 'loop',
   bucle: 'loop',
 };
-const COMMANDS = new Set(['play', 'skip', 'back', 'pause', 'resume', 'queue', 'np', 'remove', 'shuffle', 'loop', 'mix', 'archivos', 'info', 'stop']);
+const COMMANDS = new Set(['play', 'skip', 'back', 'pause', 'resume', 'queue', 'np', 'remove', 'shuffle', 'loop', 'mix', 'archivos', 'info', 'stop', 'setup']);
 // Comandos que exigen estar en el canal de voz del bot.
 const NEEDS_SAME_CHANNEL = new Set(['skip', 'back', 'pause', 'resume', 'remove', 'shuffle', 'loop', 'stop']);
 const LOOP_ARGS = { no: 'off', off: 'off', cancion: 'track', canción: 'track', track: 'track', cola: 'queue', queue: 'queue' };
@@ -106,12 +140,43 @@ const LOOP_ARGS = { no: 'off', off: 'off', cancion: 'track', canción: 'track', 
 const REPLY_TTL_MS = 10_000;
 const scheduleDelete = (msg, ms = REPLY_TTL_MS) => setTimeout(() => msg.delete().catch(() => {}), ms);
 
+// Respuestas que se borran solas. Se envían al canal (no como respuesta) porque el mensaje original se borra.
+function responder(channel) {
+  const send = (payload) => channel.send({ ...payload, allowedMentions: { parse: [] } });
+  const reply = async (level, text, ttl = REPLY_TTL_MS) => {
+    const sent = await send({ embeds: [notice(level, text)] });
+    scheduleDelete(sent, ttl);
+    return sent;
+  };
+  return { send, reply, scheduleDelete };
+}
+
 client.on('messageCreate', async (message) => {
-  if (message.author.bot || !message.guildId || !message.content.startsWith(PREFIX)) return;
+  if (message.author.bot || !message.guildId) return;
+  const isCommand = message.content.startsWith(PREFIX);
+  const inPanel = panelChannel(message.guild)?.id === message.channelId;
+
+  // En el canal de control, todo lo que no sea un comando es una canción pedida.
+  if (inPanel && !isCommand) {
+    message.delete().catch(() => {});
+    const text = message.content.trim();
+    if (!text) return;
+    console.log(`[panel] ${message.author.tag}: ${text.slice(0, 120)}`);
+    return handlePlay(message, text, responder(message.channel)).catch((err) => console.error('[panel] error:', err));
+  }
+  if (!isCommand) return;
 
   const [rawName, ...rest] = message.content.slice(PREFIX.length).trim().split(/\s+/);
   const command = ALIASES[rawName.toLowerCase()] ?? rawName.toLowerCase();
-  if (!COMMANDS.has(command)) return; // no tocar mensajes de otros bots que usen el mismo prefijo
+  const { send, reply } = responder(message.channel);
+  if (!COMMANDS.has(command)) {
+    // Fuera del panel no se tocan mensajes de otros bots que usen el mismo prefijo; dentro, se mantiene limpio.
+    if (inPanel) {
+      message.delete().catch(() => {});
+      reply('info', `Ese comando no existe. Mira todos con \`${PREFIX}info\`.`).catch(() => {});
+    }
+    return;
+  }
   console.log(`[cmd] ${message.author.tag}: ${message.content.slice(0, 120)}`);
 
   const args = rest.join(' ').trim();
@@ -119,14 +184,6 @@ client.on('messageCreate', async (message) => {
 
   // Requiere el permiso "Gestionar mensajes"; sin él el comando simplemente se queda en el chat.
   message.delete().catch(() => {});
-
-  // Se envía al canal (no como respuesta) porque el mensaje original ya se borró.
-  const send = (payload) => message.channel.send({ ...payload, allowedMentions: { parse: [] } });
-  const reply = async (level, text, ttl = REPLY_TTL_MS) => {
-    const sent = await send({ embeds: [notice(level, text)] });
-    scheduleDelete(sent, ttl);
-    return sent;
-  };
 
   // Sin "Insertar enlaces" Discord no muestra los embeds y el bot parecería mudo.
   if (!message.channel.permissionsFor(message.guild.members.me)?.has(PermissionFlagsBits.EmbedLinks)) {
@@ -143,62 +200,10 @@ client.on('messageCreate', async (message) => {
 
   try {
     switch (command) {
-      case 'play': {
-        const problem = voiceProblem(message.member);
-        if (problem) return reply('warn', problem);
-        const mix = /(^|\s)--aleatorio\b/i.test(args);
-        const input = args.replace(/(^|\s)--aleatorio\b/gi, ' ').trim();
-        if (!input) return reply('info', `Dime qué quieres escuchar. Ejemplo: \`${PREFIX}play Bad Bunny Monaco\``);
-
-        // Mensaje de "buscando" que se convierte en el resultado y luego se borra.
-        const status = await send({ embeds: [notice('info', `🔎 Buscando **${input.slice(0, 80)}**…`)] });
-        const done = async (level, text) => {
-          await status.edit({ embeds: [notice(level, text)] }).catch(() => {});
-          scheduleDelete(status);
-        };
-
-        const spotify = parseSpotifyUrl(input);
-        const local = spotify ? null : findLocalFile(input);
-        let tracks;
-        if (spotify) {
-          try {
-            tracks = await getSpotifyTracks(spotify);
-          } catch (err) {
-            console.error('[spotify]', err.message);
-            return done('error', 'No pude leer ese enlace de Spotify. Si es una playlist, asegúrate de que sea **pública**.');
-          }
-          if (!tracks.length) return done('warn', 'Esa lista de Spotify está vacía.');
-          if (mix) shuffle(tracks);
-        } else if (local) {
-          tracks = [local];
-        } else {
-          const track = await resolveTrack(input);
-          if (!track) {
-            return done(
-              'warn',
-              /^https?:\/\//.test(input)
-                ? 'No pude abrir ese enlace. Puede ser privado, haber sido borrado o requerir iniciar sesión.'
-                : `No encontré nada con **${input.slice(0, 80)}**. Prueba con otro nombre o pega un enlace.`,
-            );
-          }
-          tracks = [track];
-        }
-
-        const requester = { id: message.author.id, tag: message.author.tag };
-        for (const t of tracks) t.requester = requester;
-
-        let result;
-        try {
-          result = await enqueue(message, tracks);
-        } catch (err) {
-          console.error('[voz] no se pudo conectar:', err.message);
-          return done('error', 'No pude conectarme al canal de voz. Inténtalo de nuevo en unos segundos.');
-        }
-        if (tracks.length > 1) {
-          return done('success', `Añadí **${tracks.length} canciones** a la cola${mix ? ' en orden aleatorio 🔀' : ''}.`);
-        }
-        return done('success', result.started ? `Empezando con ${trackLine(tracks[0])}` : `Añadida a la cola en la posición **${result.position}**: ${trackLine(tracks[0])}`);
-      }
+      case 'play':
+        return handlePlay(message, args, { send, reply, scheduleDelete });
+      case 'setup':
+        return handleSetup(message, args, { reply });
       case 'skip':
         if (!queue.current) return reply('info', 'No hay ninguna canción sonando.');
         skip(queue);

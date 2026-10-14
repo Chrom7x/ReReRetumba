@@ -18,6 +18,7 @@ import {
 import { PermissionFlagsBits } from 'discord.js';
 import ffmpegPath from 'ffmpeg-static';
 import { clearNowPlaying, refreshNowPlaying, startNowPlaying } from './nowplaying.js';
+import { getSettings, updateSettings } from './settings.js';
 import { notice } from './ui.js';
 
 const YTDLP = fileURLToPath(new URL(process.platform === 'win32' ? '../bin/yt-dlp.exe' : '../bin/yt-dlp', import.meta.url));
@@ -33,7 +34,6 @@ if (process.env.YT_COOKIES_B64) {
 
 const BYTES_PER_SEC = 48000 * 2 * 2; // PCM s16le, 48 kHz, estéreo
 const SKIP_FADE_SECONDS = 2;
-const DEFAULT_FADE_SECONDS = 6;
 const PREFETCH_LEAD_SECONDS = 30; // cuánto antes de acabar una canción se empieza a cargar la siguiente
 const IDLE_LEAVE_MS = 5 * 60 * 1000; // espera en el canal tras terminar la cola
 const EMPTY_CHANNEL_LEAVE_MS = 2 * 60 * 1000; // espera si todos salen del canal de voz
@@ -43,10 +43,9 @@ const NOTICE_TTL_MS = 20_000;
 export const LOOP_MODES = ['off', 'track', 'queue'];
 
 const queues = new Map();
-const fadeByGuild = new Map();
 
-export const getFade = (guildId) => fadeByGuild.get(guildId) ?? DEFAULT_FADE_SECONDS;
-export const setFade = (guildId, seconds) => fadeByGuild.set(guildId, seconds);
+export const getFade = (guildId) => getSettings(guildId).fade;
+export const setFade = (guildId, seconds) => updateSettings(guildId, { fade: seconds });
 
 export function getQueue(guildId) {
   return queues.get(guildId);
@@ -442,6 +441,7 @@ export async function enqueue(message, newTracks) {
 
     queue = {
       guildId,
+      guild: message.guild,
       connection,
       player,
       tracks: [],

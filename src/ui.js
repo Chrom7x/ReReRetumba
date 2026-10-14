@@ -45,7 +45,8 @@ export function trackLine(track) {
   return `${link ? `[${name}](${link})` : name}${track.author ? ` — ${truncate(track.author, 40)}` : ''}${duration}`;
 }
 
-// state: { track, elapsedSec, paused, next, queued, loop, fade, hasHistory }
+// state: { track, elapsedSec, paused, next, queued, loop, fade, hasHistory, upcoming? }
+// `upcoming` (solo en el panel de control): las próximas canciones para mostrar debajo.
 export function nowPlayingPayload(state) {
   const { track } = state;
   const embed = new EmbedBuilder()
@@ -63,11 +64,36 @@ export function nowPlayingPayload(state) {
     .setFooter({
       text: `${state.queued} en cola  ·  Bucle: ${LOOP_LABELS[state.loop]}  ·  Transición: ${state.fade ? `${state.fade}s` : 'no'}`,
     });
+  if (state.upcoming) {
+    const lines = state.upcoming.slice(0, 5).map((t, i) => `\`${i + 1}.\` ${trackLine(t)}`);
+    const more = state.queued > 5 ? `\n…y **${state.queued - 5}** más` : '';
+    embed.addFields({ name: 'Próximas', value: lines.length ? truncate(lines.join('\n') + more, 1024) : '_Nada más en cola._' });
+  }
   const link = linkOf(track);
   if (link) embed.setURL(link);
   if (track.thumbnail) embed.setThumbnail(track.thumbnail);
 
-  return { embeds: [embed], components: controlRows(state), allowedMentions: { parse: [] } };
+  return { content: '', embeds: [embed], components: controlRows(state), allowedMentions: { parse: [] } };
+}
+
+// Panel de control cuando no suena nada: invita a escribir una canción en el canal.
+export function idlePanelPayload(botUser, prefix) {
+  const embed = new EmbedBuilder()
+    .setColor(COLORS.info)
+    .setAuthor({ name: `${botUser.username} · Reproductor`, iconURL: botUser.displayAvatarURL() })
+    .setTitle('🎶 No hay nada sonando')
+    .setDescription(
+      [
+        '**Escribe el nombre o el enlace de una canción en este canal** y empezará a sonar.',
+        '',
+        '• Primero entra a un **canal de voz**.',
+        '• Acepta nombres, enlaces de **YouTube**, **Spotify** (canción, álbum o playlist) y reels de **Instagram**.',
+        '• Cuando suene algo, aquí aparecerán los controles.',
+      ].join('\n'),
+    )
+    .setThumbnail(botUser.displayAvatarURL({ size: 256 }))
+    .setFooter({ text: `Todos los comandos: ${prefix}info` });
+  return { content: '', embeds: [embed], components: [], allowedMentions: { parse: [] } };
 }
 
 function controlRows(state) {
